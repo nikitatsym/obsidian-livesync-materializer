@@ -240,7 +240,7 @@ class CouchDB:
             method="POST",
             body=json.dumps({"keys": doc_ids}).encode(),
         )
-        return [row["doc"] for row in data["rows"] if "doc" in row]
+        return [row["doc"] for row in data["rows"] if row.get("doc")]
 
     def put_doc(self, doc: dict) -> dict:
         """PUT a document (create or update). Returns response with id/rev."""
@@ -732,7 +732,26 @@ class Materializer:
         files_to_update = set()
         deleted_files = []
 
-        for doc_id, doc in doc_map.items():
+        for doc_id in changed_ids:
+            doc = doc_map.get(doc_id)
+
+            # Doc not returned (deleted or purged)
+            if not doc:
+                old_meta = self.file_index.get(doc_id)
+                if old_meta:
+                    file_path = old_meta.get("path", doc_id)
+                    can_pull = True
+                    if self.sync_rules and not self.sync_rules.should_pull(file_path):
+                        can_pull = False
+                    if self.sync_guard and not self.sync_guard.should_pull(doc_id):
+                        can_pull = False
+                    if can_pull:
+                        deleted_files.append(file_path)
+                        self.delete_file(doc_id)
+                    else:
+                        self.file_index.pop(doc_id, None)
+                continue
+
             doc_type = doc.get("type")
             deleted = doc.get("_deleted") or doc.get("deleted")
 
@@ -743,7 +762,6 @@ class Materializer:
                         file_path = old_meta.get("path", doc_id)
                     else:
                         file_path = doc.get("path", doc_id)
-                    # Check sync rules and guard before deleting local file
                     can_pull = True
                     if self.sync_rules and not self.sync_rules.should_pull(file_path):
                         can_pull = False
@@ -754,7 +772,6 @@ class Materializer:
                             deleted_files.append(file_path)
                         self.delete_file(doc_id)
                     else:
-                        # Remove from index but don't delete local file
                         self.file_index.pop(doc_id, None)
                 else:
                     # Always update index for _rev tracking
