@@ -114,9 +114,9 @@ class CouchDB:
     def changes_stream(self, since: str = "now", heartbeat: int = 10000):
         """Yield change dicts from a continuous _changes feed."""
         parsed = urlparse(self.base)
-        path = f"{parsed.path}/_changes?feed=continuous&since={since}&heartbeat={heartbeat}"
 
         while True:
+            path = f"{parsed.path}/_changes?feed=continuous&since={since}&heartbeat={heartbeat}"
             try:
                 if parsed.scheme == "https":
                     conn = HTTPSConnection(parsed.hostname, parsed.port or 443)
@@ -129,28 +129,28 @@ class CouchDB:
                 })
                 resp = conn.getresponse()
 
+                # Read byte-by-byte to handle chunked transfer encoding
                 buf = b""
                 while True:
-                    chunk = resp.read(4096)
-                    if not chunk:
+                    byte = resp.read(1)
+                    if not byte:
                         break
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        line = line.strip()
+                    if byte == b"\n":
+                        line = buf.strip()
+                        buf = b""
                         if not line:
-                            continue
+                            continue  # heartbeat
                         try:
                             change = json.loads(line)
                             if "last_seq" in change:
                                 since = change["last_seq"]
-                                path = f"{parsed.path}/_changes?feed=continuous&since={since}&heartbeat={heartbeat}"
                             elif "seq" in change:
                                 since = change["seq"]
-                                path = f"{parsed.path}/_changes?feed=continuous&since={since}&heartbeat={heartbeat}"
                                 yield change
                         except json.JSONDecodeError:
                             pass
+                    else:
+                        buf += byte
             except Exception as e:
                 log.warning("Changes feed disconnected: %s. Reconnecting in 5s...", e)
                 time.sleep(5)
