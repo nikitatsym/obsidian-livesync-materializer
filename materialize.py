@@ -16,9 +16,13 @@ Environment variables:
     PBKDF2_SALT       - Base64-encoded PBKDF2 salt (required if vault is encrypted)
     OUTPUT_DIR        - Output directory (default: /output)
     DEBOUNCE          - Debounce interval in seconds (default: 1)
+    WEBHOOK_URL       - Comma-separated webhook URLs to notify on changes
+    WEBHOOK_SECRET    - HMAC-SHA256 secret for signing webhook payloads
 """
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -156,14 +160,52 @@ class CouchDB:
                 time.sleep(5)
 
 
+# --- Webhooks ---
+
+
+class WebhookNotifier:
+    def __init__(self, urls: list[str], secret: str = ""):
+        self.urls = urls
+        self.secret = secret.encode() if secret else b""
+
+    def notify(self, event: str, files: list[dict]):
+        """Send webhook notification. Non-blocking, fires in background."""
+        if not self.urls:
+            return
+        payload = json.dumps({
+            "event": event,
+            "timestamp": time.time(),
+            "files": files,
+        }).encode()
+
+        for url in self.urls:
+            threading.Thread(
+                target=self._send, args=(url, payload), daemon=True
+            ).start()
+
+    def _send(self, url: str, payload: bytes):
+        try:
+            req = Request(url, data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "obsidian-livesync-materializer")
+            if self.secret:
+                sig = hmac.new(self.secret, payload, hashlib.sha256).hexdigest()
+                req.add_header("X-Webhook-Signature", f"sha256={sig}")
+            with urlopen(req, timeout=10) as resp:
+                log.debug("Webhook %s: %d", url, resp.status)
+        except Exception as e:
+            log.warning("Webhook %s failed: %s", url, e)
+
+
 # --- Materializer ---
 
 
 class Materializer:
-    def __init__(self, db: CouchDB, output_dir: Path, decrypt_fn=None):
+    def __init__(self, db: CouchDB, output_dir: Path, decrypt_fn=None, webhook: WebhookNotifier = None):
         self.db = db
         self.output_dir = output_dir
         self.decrypt_fn = decrypt_fn
+        self.webhook = webhook
         # In-memory index: doc_id -> metadata doc
         self.file_index: dict[str, dict] = {}
 
@@ -282,6 +324,7 @@ class Materializer:
         doc_map = {d["_id"]: d for d in docs}
 
         files_to_update = set()
+        deleted_files = []
 
         for doc_id, doc in doc_map.items():
             doc_type = doc.get("type")
@@ -289,6 +332,9 @@ class Materializer:
 
             if doc_type in ("plain", "newnote"):
                 if deleted or not doc.get("children"):
+                    old_meta = self.file_index.get(doc_id)
+                    if old_meta:
+                        deleted_files.append(old_meta.get("path", doc_id))
                     self.delete_file(doc_id)
                 else:
                     self.file_index[doc_id] = doc
@@ -299,13 +345,26 @@ class Materializer:
                     if doc_id in meta.get("children", []):
                         files_to_update.add(fid)
 
+        updated_files = []
         for fid in files_to_update:
             meta = self.file_index.get(fid)
             if meta:
+                path = meta.get("path", fid)
                 if self.write_file(meta):
-                    log.info("Updated: %s", meta.get("path", fid))
+                    log.info("Updated: %s", path)
+                    updated_files.append(path)
                 else:
-                    log.error("Failed to update: %s", meta.get("path", fid))
+                    log.error("Failed to update: %s", path)
+
+        # Send webhook notifications
+        if self.webhook:
+            wh_files = []
+            for p in updated_files:
+                wh_files.append({"path": p, "action": "updated"})
+            for p in deleted_files:
+                wh_files.append({"path": p, "action": "deleted"})
+            if wh_files:
+                self.webhook.notify("files_changed", wh_files)
 
 
 def main():
@@ -330,7 +389,16 @@ def main():
         pbkdf2_salt = base64.b64decode(pbkdf2_salt_b64)
         decrypt_fn = make_decryptor(passphrase, pbkdf2_salt)
 
-    mat = Materializer(db, output_dir, decrypt_fn)
+    # Webhooks
+    webhook = None
+    webhook_urls = os.environ.get("WEBHOOK_URL", "")
+    webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
+    if webhook_urls:
+        urls = [u.strip() for u in webhook_urls.split(",") if u.strip()]
+        webhook = WebhookNotifier(urls, webhook_secret)
+        log.info("Webhooks enabled: %d URL(s)", len(urls))
+
+    mat = Materializer(db, output_dir, decrypt_fn, webhook)
 
     # Full sync first
     last_seq = mat.full_sync()

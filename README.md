@@ -26,6 +26,8 @@ ghcr.io/nikitatsym/obsidian-livesync-materializer:latest
 | `PBKDF2_SALT` | if encrypted | | Base64 PBKDF2 salt from LiveSync settings |
 | `OUTPUT_DIR` | no | `/output` | Output directory inside container |
 | `DEBOUNCE` | no | `1` | Debounce interval in seconds for changes |
+| `WEBHOOK_URL` | no | | Comma-separated URLs to POST on file changes |
+| `WEBHOOK_SECRET` | no | | HMAC-SHA256 secret for signing webhook payloads |
 
 ### Where to find E2EE parameters
 
@@ -85,6 +87,37 @@ Add an rclone container to periodically archive the vault to S3:
 ```
 
 See [backup.sh](backup.sh) for the script — creates hourly tar.gz archives, prunes by age and total size.
+
+## Webhooks
+
+Set `WEBHOOK_URL` to get notified when vault files change. Multiple URLs can be comma-separated.
+
+Payload (`POST`, `Content-Type: application/json`):
+
+```json
+{
+  "event": "files_changed",
+  "timestamp": 1772361170.267,
+  "files": [
+    {"path": "Diary/2026-03-01.md", "action": "updated"},
+    {"path": "old-note.md", "action": "deleted"}
+  ]
+}
+```
+
+If `WEBHOOK_SECRET` is set, each request includes an `X-Webhook-Signature` header:
+
+```
+X-Webhook-Signature: sha256=<HMAC-SHA256 hex digest of the body>
+```
+
+Verify it like GitHub webhooks:
+
+```python
+import hmac, hashlib
+expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+assert signature == f"sha256={expected}"
+```
 
 ## License
 
