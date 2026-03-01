@@ -40,6 +40,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse, quote
 from urllib.request import Request, urlopen
 
+os.umask(0o002)  # new files: rw-rw-r--, new dirs: rwxrwxr-x
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
