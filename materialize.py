@@ -483,8 +483,11 @@ class Materializer:
 
             mtime = meta.get("mtime")
             if mtime:
-                mtime_sec = mtime / 1000.0
-                os.utime(out_path, (mtime_sec, mtime_sec))
+                try:
+                    mtime_sec = mtime / 1000.0
+                    os.utime(out_path, (mtime_sec, mtime_sec))
+                except OSError:
+                    pass  # can't set mtime on files owned by others
 
             # Update sync state
             if self.sync_guard:
